@@ -39,6 +39,8 @@ This fork also supports faster attention backends. On the tested environment, th
 - `ATTENTION_BACKEND = "flash"`
 - `STAGE_OFFLOAD = True`
 
+On the tested machine, this staged-offload strategy was not just a memory workaround. A local benchmark on the Z-Image transformer showed that CPU-side `deepcopy` was significantly faster than moving the same transformer from GPU back to CPU, which strongly supports the "CPU-resident master copy + temporary GPU execution copy" design used in this fork.
+
 ## Why This Exists
 
 The official project already works. This fork exists because I wanted a version that is:
@@ -200,8 +202,9 @@ Batch filenames include:
 
 For a machine similar to the one used during testing:
 
-- 64 GB system RAM
-- 16 GB VRAM
+- Intel Core i5-12490F
+- DDR4-3200 64 GB RAM
+- NVIDIA RTX 4070 Ti Super 16 GB VRAM
 - local model files already downloaded
 
 try:
