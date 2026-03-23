@@ -2,6 +2,11 @@
 
 This repository is a personal fork of the official Z-Image native PyTorch implementation.
 
+The model files used by this fork are expected to be downloaded separately from Hugging Face:
+
+- Z-Image-Turbo: https://huggingface.co/Tongyi-MAI/Z-Image-Turbo
+- Z-Image: https://huggingface.co/Tongyi-MAI/Z-Image
+
 The goal of this fork is simple:
 
 - learn and verify the full text-to-image inference path in plain Python
@@ -45,6 +50,14 @@ The official project already works. This fork exists because I wanted a version 
 
 ## Current Workflow
 
+Install the Python dependencies first:
+
+```bash
+pip install -e .
+```
+
+Then edit [model_paths.py](model_paths.py) so it points at your local model files and preferred runtime settings.
+
 Single image inference:
 
 ```bash
@@ -57,7 +70,7 @@ Batch inference from a prompt text file:
 python batch_inference.py
 ```
 
-Prompts are read from [prompts/prompt1.txt](prompts/prompt1.txt) by default, unless you change `PROMPTS_FILE` in [model_paths.py](model_paths.py).
+Prompts are read from `prompts/prompt1.txt` by default, unless you change `PROMPTS_FILE` in [model_paths.py](model_paths.py).
 
 The `prompts/` directory is tracked, but prompt text files are intentionally ignored. Create your own prompt file there, for example `prompts/prompt1.txt`.
 
@@ -133,11 +146,9 @@ Recommended approach:
 1. build FlashAttention yourself for your exact Python / PyTorch / CUDA environment
 2. install it into your inference environment
 
-If your environment matches mine closely enough, you can also try the included wheel:
+This fork does not commit a prebuilt wheel to the repository. If you already have a compatible FlashAttention wheel for your exact environment, you can install that locally instead of rebuilding.
 
-- [wheels/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl](wheels/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl)
-
-This wheel was tested with:
+The environment used during testing was:
 
 - Python 3.12
 - PyTorch 2.10.0 + CUDA 12.8
