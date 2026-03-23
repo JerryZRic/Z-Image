@@ -6,7 +6,8 @@ __pycache__/
 # C extensions
 *.so
 outputs/
-prompts/
+prompts/*
+!prompts/.gitkeep
 # Distribution / packaging
 .Python
 build/

@@ -54,7 +54,6 @@ def load_sharded_safetensors(weight_dir: Path, device: str = "cuda", dtype: Opti
 
     state_dict = {}
     if index_files:
-        # Load sharded weights
         with open(index_files[0], "r") as f:
             index = json.load(f)
         weight_map = index.get("weight_map", {})
@@ -64,88 +63,88 @@ def load_sharded_safetensors(weight_dir: Path, device: str = "cuda", dtype: Opti
             shard_state = load_file(str(shard_path), device=str(device))
             state_dict.update(shard_state)
     else:
-        # Load single safetensors file
         safetensors_files = list(weight_dir.glob("*.safetensors"))
         if not safetensors_files:
             raise FileNotFoundError(f"No safetensors files found in {weight_dir}")
         state_dict = load_file(str(safetensors_files[0]), device=str(device))
 
-    # Cast to target dtype if specified
     if dtype is not None:
         state_dict = {k: v.to(dtype) if v.dtype != dtype else v for k, v in state_dict.items()}
 
     return state_dict
 
 
-def load_from_local_dir(
-    model_dir: Union[str, Path],
+def _normalize_component_dir(path: Union[str, Path]) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def _load_components_from_dirs(
+    transformer_dir: Union[str, Path],
+    vae_dir: Union[str, Path],
+    text_encoder_dir: Union[str, Path],
+    tokenizer_dir: Union[str, Path],
+    scheduler_dir: Union[str, Path],
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     verbose: bool = False,
     compile: bool = False,
+    vae_device: Optional[str] = None,
+    text_encoder_device: Optional[str] = None,
 ) -> dict:
-    """
-    Load all Z-Image components from local directory.
+    transformer_dir = _normalize_component_dir(transformer_dir)
+    vae_dir = _normalize_component_dir(vae_dir)
+    text_encoder_dir = _normalize_component_dir(text_encoder_dir)
+    tokenizer_dir = _normalize_component_dir(tokenizer_dir)
+    scheduler_dir = _normalize_component_dir(scheduler_dir)
 
-    Args:
-        model_dir: Path to model directory
-        device: Device to load models on
-        dtype: Data type for model weights
-        verbose: Whether to display loading logs
-        compile: Whether to compile transformer and vae with torch.compile
-
-    Returns:
-        Dictionary containing transformer, vae, text_encoder, tokenizer, and scheduler
-    """
-    model_dir = Path(model_dir)
-
-    sys.path.insert(0, str(model_dir.parent.parent / "Z-Image" / "src"))
+    repo_src_dir = Path(__file__).resolve().parents[2] / "src"
+    sys.path.insert(0, str(repo_src_dir))
     from zimage.transformer import ZImageTransformer2DModel
 
     if verbose:
-        logger.info(f"Loading Z-Image from: {model_dir}")
+        logger.info("Loading Z-Image from configured component paths")
 
-    # DiT
+    if vae_device is None:
+        vae_device = "cpu"
+    if text_encoder_device is None:
+        text_encoder_device = "cpu"
+
     if verbose:
         logger.info("Loading DiT...")
-    transformer_dir = model_dir / "transformer"
-    config = load_config(str(transformer_dir / "config.json"))
+    transformer_config = load_config(str(transformer_dir / "config.json"))
 
     with torch.device("meta"):
         transformer = ZImageTransformer2DModel(
-            all_patch_size=tuple(config.get("all_patch_size", DEFAULT_TRANSFORMER_PATCH_SIZE)),
-            all_f_patch_size=tuple(config.get("all_f_patch_size", DEFAULT_TRANSFORMER_F_PATCH_SIZE)),
-            in_channels=config.get("in_channels", DEFAULT_TRANSFORMER_IN_CHANNELS),
-            dim=config.get("dim", DEFAULT_TRANSFORMER_DIM),
-            n_layers=config.get("n_layers", DEFAULT_TRANSFORMER_N_LAYERS),
-            n_refiner_layers=config.get("n_refiner_layers", DEFAULT_TRANSFORMER_N_REFINER_LAYERS),
-            n_heads=config.get("n_heads", DEFAULT_TRANSFORMER_N_HEADS),
-            n_kv_heads=config.get("n_kv_heads", DEFAULT_TRANSFORMER_N_KV_HEADS),
-            norm_eps=config.get("norm_eps", DEFAULT_TRANSFORMER_NORM_EPS),
-            qk_norm=config.get("qk_norm", DEFAULT_TRANSFORMER_QK_NORM),
-            cap_feat_dim=config.get("cap_feat_dim", DEFAULT_TRANSFORMER_CAP_FEAT_DIM),
-            rope_theta=config.get("rope_theta", ROPE_THETA),
-            t_scale=config.get("t_scale", DEFAULT_TRANSFORMER_T_SCALE),
-            axes_dims=config.get("axes_dims", ROPE_AXES_DIMS),
-            axes_lens=config.get("axes_lens", ROPE_AXES_LENS),
+            all_patch_size=tuple(transformer_config.get("all_patch_size", DEFAULT_TRANSFORMER_PATCH_SIZE)),
+            all_f_patch_size=tuple(transformer_config.get("all_f_patch_size", DEFAULT_TRANSFORMER_F_PATCH_SIZE)),
+            in_channels=transformer_config.get("in_channels", DEFAULT_TRANSFORMER_IN_CHANNELS),
+            dim=transformer_config.get("dim", DEFAULT_TRANSFORMER_DIM),
+            n_layers=transformer_config.get("n_layers", DEFAULT_TRANSFORMER_N_LAYERS),
+            n_refiner_layers=transformer_config.get("n_refiner_layers", DEFAULT_TRANSFORMER_N_REFINER_LAYERS),
+            n_heads=transformer_config.get("n_heads", DEFAULT_TRANSFORMER_N_HEADS),
+            n_kv_heads=transformer_config.get("n_kv_heads", DEFAULT_TRANSFORMER_N_KV_HEADS),
+            norm_eps=transformer_config.get("norm_eps", DEFAULT_TRANSFORMER_NORM_EPS),
+            qk_norm=transformer_config.get("qk_norm", DEFAULT_TRANSFORMER_QK_NORM),
+            cap_feat_dim=transformer_config.get("cap_feat_dim", DEFAULT_TRANSFORMER_CAP_FEAT_DIM),
+            rope_theta=transformer_config.get("rope_theta", ROPE_THETA),
+            t_scale=transformer_config.get("t_scale", DEFAULT_TRANSFORMER_T_SCALE),
+            axes_dims=transformer_config.get("axes_dims", ROPE_AXES_DIMS),
+            axes_lens=transformer_config.get("axes_lens", ROPE_AXES_LENS),
         ).to(dtype)
 
-    # DiT (weights to CPU then move to GPU to optimize memory)
     state_dict = load_sharded_safetensors(transformer_dir, device="cpu", dtype=dtype)
     transformer.load_state_dict(state_dict, strict=False, assign=True)
     del state_dict
 
     if verbose:
-        logger.info("Moving DiT to GPU...")
+        logger.info("Moving DiT to target device...")
     transformer = transformer.to(device)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     transformer.eval()
 
-    # VAE
     if verbose:
         logger.info("Loading VAE...")
-    vae_dir = model_dir / "vae"
     vae_config = load_config(str(vae_dir / "config.json"))
 
     vae = LocalAutoencoderKL(
@@ -163,42 +162,50 @@ def load_from_local_dir(
         use_post_quant_conv=vae_config.get("use_post_quant_conv", True),
         mid_block_add_attention=vae_config.get("mid_block_add_attention", True),
     )
+    vae._init_kwargs = {
+        "in_channels": vae_config.get("in_channels", DEFAULT_VAE_IN_CHANNELS),
+        "out_channels": vae_config.get("out_channels", DEFAULT_VAE_OUT_CHANNELS),
+        "down_block_types": tuple(vae_config.get("down_block_types", ("DownEncoderBlock2D",))),
+        "up_block_types": tuple(vae_config.get("up_block_types", ("UpDecoderBlock2D",))),
+        "block_out_channels": tuple(vae_config.get("block_out_channels", (64,))),
+        "layers_per_block": vae_config.get("layers_per_block", 1),
+        "latent_channels": vae_config.get("latent_channels", DEFAULT_VAE_LATENT_CHANNELS),
+        "norm_num_groups": vae_config.get("norm_num_groups", DEFAULT_VAE_NORM_NUM_GROUPS),
+        "scaling_factor": vae_config.get("scaling_factor", DEFAULT_VAE_SCALING_FACTOR),
+        "shift_factor": vae_config.get("shift_factor", None),
+        "use_quant_conv": vae_config.get("use_quant_conv", True),
+        "use_post_quant_conv": vae_config.get("use_post_quant_conv", True),
+        "mid_block_add_attention": vae_config.get("mid_block_add_attention", True),
+    }
 
-    # VAE (fp32 for better precision)
     vae_state_dict = load_sharded_safetensors(vae_dir, device="cpu")
     vae.load_state_dict(vae_state_dict, strict=False)
     del vae_state_dict
-    vae.to(device=device, dtype=torch.float32)
+    vae.to(device=vae_device, dtype=torch.float32)
     vae.eval()
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    # Text Encoder
     if verbose:
         logger.info("Loading Text Encoder...")
-    text_encoder_dir = model_dir / "text_encoder"
     text_encoder = AutoModel.from_pretrained(
         str(text_encoder_dir),
-        # torch_dtype=dtype, # some version use this
         dtype=dtype,
         trust_remote_code=True,
     )
-    text_encoder.to(device)
+    text_encoder.to(text_encoder_device)
     text_encoder.eval()
 
-    # Tokenizer
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     if verbose:
         logger.info("Loading Tokenizer...")
-    tokenizer_dir = model_dir / "tokenizer"
     tokenizer = AutoTokenizer.from_pretrained(
         str(tokenizer_dir) if tokenizer_dir.exists() else str(text_encoder_dir),
         trust_remote_code=True,
     )
 
-    # Scheduler
     if verbose:
         logger.info("Loading Scheduler...")
-    scheduler_dir = model_dir / "scheduler"
     scheduler_config = load_config(str(scheduler_dir / "scheduler_config.json"))
     scheduler = FlowMatchEulerDiscreteScheduler(
         num_train_timesteps=scheduler_config.get("num_train_timesteps", DEFAULT_SCHEDULER_NUM_TRAIN_TIMESTEPS),
@@ -222,3 +229,59 @@ def load_from_local_dir(
         "tokenizer": tokenizer,
         "scheduler": scheduler,
     }
+
+
+def load_from_local_dir(
+    model_dir: Union[str, Path],
+    device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+    verbose: bool = False,
+    compile: bool = False,
+    vae_device: Optional[str] = None,
+    text_encoder_device: Optional[str] = None,
+) -> dict:
+    """Load all Z-Image components from a local model root directory."""
+    model_dir = Path(model_dir).expanduser().resolve()
+
+    if verbose:
+        logger.info(f"Loading Z-Image from: {model_dir}")
+
+    return _load_components_from_dirs(
+        transformer_dir=model_dir / "transformer",
+        vae_dir=model_dir / "vae",
+        text_encoder_dir=model_dir / "text_encoder",
+        tokenizer_dir=model_dir / "tokenizer",
+        scheduler_dir=model_dir / "scheduler",
+        device=device,
+        dtype=dtype,
+        verbose=verbose,
+        compile=compile,
+        vae_device=vae_device,
+        text_encoder_device=text_encoder_device,
+    )
+
+
+def load_from_fixed_paths(
+    device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+    verbose: bool = False,
+    compile: bool = False,
+    vae_device: Optional[str] = None,
+    text_encoder_device: Optional[str] = None,
+) -> dict:
+    """Load all Z-Image components from the fixed paths in ``model_paths.py``."""
+    from model_paths import SCHEDULER_DIR, TEXT_ENCODER_DIR, TOKENIZER_DIR, TRANSFORMER_DIR, VAE_DIR
+
+    return _load_components_from_dirs(
+        transformer_dir=TRANSFORMER_DIR,
+        vae_dir=VAE_DIR,
+        text_encoder_dir=TEXT_ENCODER_DIR,
+        tokenizer_dir=TOKENIZER_DIR,
+        scheduler_dir=SCHEDULER_DIR,
+        device=device,
+        dtype=dtype,
+        verbose=verbose,
+        compile=compile,
+        vae_device=vae_device,
+        text_encoder_device=text_encoder_device,
+    )

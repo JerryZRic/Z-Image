@@ -1,5 +1,6 @@
 """Helper utilities for Z-Image."""
 
+import gc
 import hashlib
 import json
 from pathlib import Path
@@ -47,6 +48,80 @@ def print_memory_stats(stage: str) -> None:
     logger.info(f"  Current Reserved:  {format_bytes(current_reserved)}")
     logger.info(f"  Peak Allocated:    {format_bytes(allocated)}")
     logger.info(f"  Peak Reserved:     {format_bytes(reserved)}")
+
+
+def _get_process_rss_bytes() -> int:
+    """Read current process RSS from /proc for Linux hosts."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    return int(parts[1]) * 1024
+    except OSError:
+        return 0
+    return 0
+
+
+def _tensor_nbytes(tensor: torch.Tensor) -> int:
+    return tensor.numel() * tensor.element_size()
+
+
+def _module_nbytes(module) -> int:
+    total = 0
+    for param in module.parameters():
+        total += _tensor_nbytes(param)
+    for buf in module.buffers():
+        total += _tensor_nbytes(buf)
+    return total
+
+
+def debug_memory_snapshot(stage: str, modules: Optional[Dict[str, object]] = None, tensors: Optional[Dict[str, object]] = None) -> None:
+    """Print a compact CPU/GPU memory snapshot for debugging staged offload."""
+    gc.collect()
+
+    rss_bytes = _get_process_rss_bytes()
+    logger.info(f"[{stage}] Process RSS: {format_bytes(rss_bytes)}")
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        logger.info(
+            f"[{stage}] CUDA: allocated={format_bytes(torch.cuda.memory_allocated())}, "
+            f"reserved={format_bytes(torch.cuda.memory_reserved())}, "
+            f"peak={format_bytes(torch.cuda.max_memory_allocated())}"
+        )
+
+    if modules:
+        for name, module in modules.items():
+            if module is None:
+                logger.info(f"[{stage}] Module {name}: <none>")
+                continue
+            try:
+                first_tensor = next(module.parameters(), None)
+                if first_tensor is None:
+                    first_tensor = next(module.buffers(), None)
+                device = first_tensor.device if first_tensor is not None else "unknown"
+                size_bytes = _module_nbytes(module)
+                logger.info(f"[{stage}] Module {name}: device={device}, size={format_bytes(size_bytes)}")
+            except Exception as exc:
+                logger.warning(f"[{stage}] Module {name}: failed to inspect ({exc})")
+
+    if tensors:
+        for name, value in tensors.items():
+            if value is None:
+                logger.info(f"[{stage}] Tensor {name}: <none>")
+                continue
+            if isinstance(value, torch.Tensor):
+                logger.info(
+                    f"[{stage}] Tensor {name}: device={value.device}, dtype={value.dtype}, "
+                    f"shape={tuple(value.shape)}, size={format_bytes(_tensor_nbytes(value))}"
+                )
+            elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+                total = sum(_tensor_nbytes(t) for t in value)
+                logger.info(
+                    f"[{stage}] TensorList {name}: count={len(value)}, device={value[0].device}, "
+                    f"size={format_bytes(total)}"
+                )
 
 
 def compute_file_md5(file_path: Path, chunk_size: int = 8192) -> str:

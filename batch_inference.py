@@ -3,11 +3,24 @@
 import os
 from pathlib import Path
 import time
+from itertools import cycle, islice
 
 import torch
 
-from inference import ensure_weights
-from utils import AttentionBackend, load_from_local_dir, set_attention_backend
+from model_paths import (
+    ATTENTION_BACKEND,
+    BATCH_OUTPUT_DIR,
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    PARALLEL_BATCH_SIZE,
+    PROMPTS_FILE,
+    SEED_MODE,
+    SEED_STATE_FILE,
+    SEED_VALUE,
+    SERIAL_BATCH_COUNT,
+    STAGE_OFFLOAD,
+)
+from utils import AttentionBackend, load_from_fixed_paths, resolve_seed_sequence, set_attention_backend
 from zimage import generate
 
 
@@ -24,7 +37,7 @@ def read_prompts(path: str) -> list[str]:
     return prompts
 
 
-PROMPTS = read_prompts(os.environ.get("PROMPTS_FILE", "prompts/prompt1.txt"))
+PROMPTS = read_prompts(os.environ.get("PROMPTS_FILE", str(PROMPTS_FILE)))
 
 
 def slugify(text: str, max_len: int = 60) -> str:
@@ -33,6 +46,13 @@ def slugify(text: str, max_len: int = 60) -> str:
     slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in text)
     slug = "-".join(part for part in slug.split("-") if part)
     return slug[:max_len].rstrip("-") or "prompt"
+
+
+def build_prompt_schedule(prompts: list[str], total_count: int) -> list[str]:
+    """Build a fixed-length prompt schedule and cycle when needed."""
+    if total_count <= 0:
+        raise ValueError("SERIAL_BATCH_COUNT must be >= 1")
+    return list(islice(cycle(prompts), total_count))
 
 
 def select_device() -> str:
@@ -56,27 +76,45 @@ def select_device() -> str:
 
 
 def main():
-    model_path = ensure_weights("ckpts/Z-Image-Turbo")
     dtype = torch.bfloat16
     compile = False
-    height = 1024
-    width = 1024
+    stage_offload = STAGE_OFFLOAD
+    height = IMAGE_HEIGHT
+    width = IMAGE_WIDTH
     num_inference_steps = 8
     guidance_scale = 0.0
-    attn_backend = os.environ.get("ZIMAGE_ATTENTION", "_native_flash")
-    output_dir = Path("outputs")
+    attn_backend = os.environ.get("ZIMAGE_ATTENTION", ATTENTION_BACKEND)
+    output_dir = BATCH_OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
+    total_count = SERIAL_BATCH_COUNT
+    parallel_batch_size = PARALLEL_BATCH_SIZE
+    if parallel_batch_size <= 0:
+        raise ValueError("PARALLEL_BATCH_SIZE must be >= 1")
 
     device = select_device()
+    seeds, seed_mode = resolve_seed_sequence(SEED_MODE, SEED_VALUE, total_count, SEED_STATE_FILE)
+    preview_count = min(5, len(seeds))
+    print(f"Chosen seeds ({seed_mode}): {seeds[:preview_count]}{' ...' if len(seeds) > preview_count else ''}")
+    print(f"Serial batch count: {total_count}")
+    print(f"Parallel batch size: {parallel_batch_size}")
 
-    components = load_from_local_dir(model_path, device=device, dtype=dtype, compile=compile)
+    load_device = "cpu" if stage_offload and device == "cuda" else device
+    components = load_from_fixed_paths(
+        device=load_device,
+        dtype=dtype,
+        compile=compile,
+        vae_device="cpu",
+        text_encoder_device="cpu",
+    )
     AttentionBackend.print_available_backends()
     set_attention_backend(attn_backend)
     print(f"Chosen attention backend: {attn_backend}")
 
-    for idx, prompt in enumerate(PROMPTS, start=1):
-        output_path = output_dir / f"prompt-{idx:02d}-{slugify(prompt)}.png"
-        seed = 42 + idx - 1
+    scheduled_prompts = build_prompt_schedule(PROMPTS, total_count)
+
+    for idx, prompt in enumerate(scheduled_prompts, start=1):
+        seed = seeds[idx - 1]
+        output_path = output_dir / f"prompt-{idx:02d}-seed{seed}-{slugify(prompt)}.png"
         generator = torch.Generator(device).manual_seed(seed)
 
         start_time = time.time()
@@ -88,10 +126,12 @@ def main():
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             generator=generator,
+            execution_device=device,
+            stage_offload=stage_offload,
         )
         elapsed = time.time() - start_time
         images[0].save(output_path)
-        print(f"[{idx}/{len(PROMPTS)}] Saved {output_path} in {elapsed:.2f} seconds")
+        print(f"[{idx}/{total_count}] Saved {output_path} in {elapsed:.2f} seconds")
 
     print("Done.")
 

@@ -1,6 +1,9 @@
 """Z-Image Pipeline."""
 
+import copy
+import gc
 import inspect
+import os
 from typing import List, Optional, Union
 
 from loguru import logger
@@ -18,6 +21,7 @@ from config import (
     MAX_IMAGE_SEQ_LEN,
     MAX_SHIFT,
 )
+from utils import debug_memory_snapshot
 
 
 def calculate_shift(
@@ -82,8 +86,53 @@ def generate(
     cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
     max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
     output_type: str = "pil",
+    execution_device: Optional[Union[str, torch.device]] = None,
+    stage_offload: bool = False,
 ):
-    device = next(transformer.parameters()).device
+    memory_debug = os.environ.get("ZIMAGE_DEBUG_MEMORY", "0") == "1"
+
+    if execution_device is None:
+        execution_device = next(transformer.parameters()).device
+    execution_device = torch.device(execution_device)
+
+    transformer_device = next(transformer.parameters()).device
+    text_encoder_device = next(text_encoder.parameters()).device
+    vae_device = next(vae.parameters()).device
+
+    def clone_module_to_device(module, target_device, target_dtype=None):
+        try:
+            runtime_module = copy.deepcopy(module)
+        except Exception:
+            init_kwargs = getattr(module, "_init_kwargs", None)
+            if init_kwargs is None:
+                raise
+            runtime_module = type(module)(**init_kwargs)
+            runtime_module.load_state_dict(module.state_dict(), strict=False)
+        kwargs = {"device": target_device}
+        if target_dtype is not None:
+            kwargs["dtype"] = target_dtype
+        runtime_module = runtime_module.to(**kwargs)
+        runtime_module.eval()
+        return runtime_module
+
+    def cleanup_cuda_stage():
+        gc.collect()
+        if execution_device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+    if stage_offload:
+        text_encoder_runtime = clone_module_to_device(text_encoder, execution_device, next(text_encoder.parameters()).dtype)
+        text_encoder_device = next(text_encoder_runtime.parameters()).device
+        if memory_debug:
+            debug_memory_snapshot(
+                "text_encoder_on_gpu",
+                modules={"text_encoder_cpu": text_encoder, "text_encoder_gpu": text_encoder_runtime},
+            )
+    else:
+        text_encoder_runtime = text_encoder
+
+    device = execution_device if stage_offload else transformer_device
 
     if hasattr(vae, "config") and hasattr(vae.config, "block_out_channels"):
         vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
@@ -124,10 +173,10 @@ def generate(
         return_tensors="pt",
     )
 
-    text_input_ids = text_inputs.input_ids.to(device)
-    prompt_masks = text_inputs.attention_mask.to(device).bool()
+    text_input_ids = text_inputs.input_ids.to(text_encoder_device)
+    prompt_masks = text_inputs.attention_mask.to(text_encoder_device).bool()
 
-    prompt_embeds = text_encoder(
+    prompt_embeds = text_encoder_runtime(
         input_ids=text_input_ids,
         attention_mask=prompt_masks,
         output_hidden_states=True,
@@ -135,7 +184,8 @@ def generate(
 
     prompt_embeds_list = []
     for i in range(len(prompt_embeds)):
-        prompt_embeds_list.append(prompt_embeds[i][prompt_masks[i]])
+        target_device = torch.device("cpu") if stage_offload else device
+        prompt_embeds_list.append(prompt_embeds[i][prompt_masks[i]].to(target_device))
 
     negative_prompt_embeds_list = []
     if do_classifier_free_guidance:
@@ -163,17 +213,50 @@ def generate(
             return_tensors="pt",
         )
 
-        neg_input_ids = neg_inputs.input_ids.to(device)
-        neg_masks = neg_inputs.attention_mask.to(device).bool()
+        neg_input_ids = neg_inputs.input_ids.to(text_encoder_device)
+        neg_masks = neg_inputs.attention_mask.to(text_encoder_device).bool()
 
-        neg_embeds = text_encoder(
+        neg_embeds = text_encoder_runtime(
             input_ids=neg_input_ids,
             attention_mask=neg_masks,
             output_hidden_states=True,
         ).hidden_states[-2]
 
         for i in range(len(neg_embeds)):
-            negative_prompt_embeds_list.append(neg_embeds[i][neg_masks[i]])
+            target_device = torch.device("cpu") if stage_offload else device
+            negative_prompt_embeds_list.append(neg_embeds[i][neg_masks[i]].to(target_device))
+
+    if stage_offload:
+        del text_input_ids, prompt_masks, prompt_embeds
+        if do_classifier_free_guidance:
+            del neg_input_ids, neg_masks, neg_embeds
+        del text_encoder_runtime
+        cleanup_cuda_stage()
+        if memory_debug:
+            debug_memory_snapshot(
+                "after_text_encoder_cleanup",
+                modules={"text_encoder_cpu": text_encoder},
+                tensors={
+                    "prompt_embeds_cpu": prompt_embeds_list,
+                    "negative_prompt_embeds_cpu": negative_prompt_embeds_list if negative_prompt_embeds_list else None,
+                },
+            )
+        transformer_runtime = clone_module_to_device(transformer, execution_device, next(transformer.parameters()).dtype)
+        transformer_device = next(transformer_runtime.parameters()).device
+        device = transformer_device
+        prompt_embeds_list = [pe.to(device) for pe in prompt_embeds_list]
+        negative_prompt_embeds_list = [npe.to(device) for npe in negative_prompt_embeds_list]
+        if memory_debug:
+            debug_memory_snapshot(
+                "transformer_on_gpu",
+                modules={"transformer_cpu": transformer, "transformer_gpu": transformer_runtime},
+                tensors={
+                    "prompt_embeds_gpu": prompt_embeds_list,
+                    "negative_prompt_embeds_gpu": negative_prompt_embeds_list if negative_prompt_embeds_list else None,
+                },
+            )
+    else:
+        transformer_runtime = transformer
 
     if num_images_per_prompt > 1:
         prompt_embeds_list = [pe for pe in prompt_embeds_list for _ in range(num_images_per_prompt)]
@@ -232,20 +315,22 @@ def generate(
 
         if apply_cfg:
             latents_typed = latents.to(
-                transformer.dtype if hasattr(transformer, "dtype") else next(transformer.parameters()).dtype
+                transformer_runtime.dtype
+                if hasattr(transformer_runtime, "dtype")
+                else next(transformer_runtime.parameters()).dtype
             )
             latent_model_input = latents_typed.repeat(2, 1, 1, 1)
             prompt_embeds_model_input = prompt_embeds_list + negative_prompt_embeds_list
             timestep_model_input = timestep.repeat(2)
         else:
-            latent_model_input = latents.to(next(transformer.parameters()).dtype)
+            latent_model_input = latents.to(next(transformer_runtime.parameters()).dtype)
             prompt_embeds_model_input = prompt_embeds_list
             timestep_model_input = timestep
 
         latent_model_input = latent_model_input.unsqueeze(2)
         latent_model_input_list = list(latent_model_input.unbind(dim=0))
 
-        model_out_list = transformer(
+        model_out_list = transformer_runtime(
             latent_model_input_list,
             timestep_model_input,
             prompt_embeds_model_input,
@@ -278,9 +363,29 @@ def generate(
     if output_type == "latent":
         return latents
 
-    shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
-    latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
-    image = vae.decode(latents, return_dict=False)[0]
+    if stage_offload:
+        del transformer_runtime
+        cleanup_cuda_stage()
+        vae_runtime = clone_module_to_device(vae, execution_device, next(vae.parameters()).dtype)
+        vae_device = next(vae_runtime.parameters()).device
+        if memory_debug:
+            debug_memory_snapshot(
+                "vae_on_gpu",
+                modules={"vae_cpu": vae, "vae_gpu": vae_runtime},
+                tensors={"latents_for_vae": latents},
+            )
+    else:
+        vae_runtime = vae
+
+    shift_factor = getattr(vae_runtime.config, "shift_factor", 0.0) or 0.0
+    latents = (latents.to(device=vae_device, dtype=vae_runtime.dtype) / vae_runtime.config.scaling_factor) + shift_factor
+    image = vae_runtime.decode(latents, return_dict=False)[0]
+
+    if stage_offload:
+        del vae_runtime
+        cleanup_cuda_stage()
+        if memory_debug:
+            debug_memory_snapshot("after_vae_cleanup", modules={"vae_cpu": vae})
 
     if output_type == "pil":
         from PIL import Image
