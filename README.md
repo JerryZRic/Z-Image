@@ -72,6 +72,12 @@ Batch inference from a prompt text file:
 python batch_inference.py
 ```
 
+Streaming batch inference with prompt pre-encoding and immediate preview output:
+
+```bash
+python batch_inference_streaming.py
+```
+
 Prompts are read from `prompts/prompt1.txt` by default, unless you change `PROMPTS_FILE` in [model_paths.py](model_paths.py).
 
 The `prompts/` directory is tracked, but prompt text files are intentionally ignored. Create your own prompt file there, for example `prompts/prompt1.txt`.
@@ -91,6 +97,7 @@ Important ones:
 - output paths:
   - `SINGLE_OUTPUT_DIR`
   - `BATCH_OUTPUT_DIR`
+  - `FINAL_OUTPUT_DIR`
 - image size:
   - `IMAGE_WIDTH`
   - `IMAGE_HEIGHT`
@@ -104,6 +111,9 @@ Important ones:
 - runtime behavior:
   - `ATTENTION_BACKEND`
   - `STAGE_OFFLOAD`
+  - `SAVE_FINAL_IMAGES`
+  - `PREVIEW_IMAGE_FORMAT`
+  - `FINAL_IMAGE_FORMAT`
 
 ### Seed Modes
 
@@ -138,6 +148,32 @@ For serial batch scheduling:
 - empty lines are skipped
 - if `SERIAL_BATCH_COUNT` is smaller than the number of prompts, only the first prompts are used
 - if `SERIAL_BATCH_COUNT` is larger than the number of prompts, the prompt list loops from the beginning until the requested count is reached
+
+## Batch Modes
+
+This fork currently provides two batch workflows:
+
+### `batch_inference.py`
+
+This is the simpler baseline batch runner:
+
+- each image runs through the full pipeline independently
+- easier to understand
+- useful as a reference path
+
+### `batch_inference_streaming.py`
+
+This is the more optimized batch runner:
+
+- prompt embeddings are prepared up front and cached in RAM
+- the text encoder is not re-run for every image
+- the transformer stays on GPU across the batch
+- the VAE runs in `bfloat16` for faster/lower-memory preview decode
+- each image is decoded and saved immediately after denoising
+- preview images can be written as JPEG for fast local inspection
+- after the batch finishes, the stored latents can optionally be decoded again with a `float32` VAE for final-quality outputs
+
+At the moment, this is the recommended batch workflow for the tested hardware configuration.
 
 ## FlashAttention
 
