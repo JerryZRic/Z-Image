@@ -88,12 +88,17 @@ Most day-to-day settings now live in [model_paths.py](model_paths.py).
 
 Important ones:
 
+- model variant:
+  - `MODEL_VARIANT`
 - model directories:
   - `TRANSFORMER_DIR`
   - `VAE_DIR`
   - `TEXT_ENCODER_DIR`
   - `TOKENIZER_DIR`
   - `SCHEDULER_DIR`
+- prompt files:
+  - `PROMPTS_FILE`
+  - `NEGATIVE_PROMPTS_FILE`
 - output paths:
   - `SINGLE_OUTPUT_DIR`
   - `BATCH_OUTPUT_DIR`
@@ -111,9 +116,37 @@ Important ones:
 - runtime behavior:
   - `ATTENTION_BACKEND`
   - `STAGE_OFFLOAD`
+  - `CFG_NORMALIZATION`
   - `SAVE_FINAL_IMAGES`
   - `PREVIEW_IMAGE_FORMAT`
   - `FINAL_IMAGE_FORMAT`
+
+### Model Variants
+
+This fork can switch between the official model families with:
+
+- `MODEL_VARIANT = "turbo"`
+- `MODEL_VARIANT = "base"`
+
+This changes both the model root directory and the default inference presets:
+
+- `turbo`
+  - `DEFAULT_INFERENCE_STEPS = 8`
+  - `DEFAULT_GUIDANCE_SCALE = 0.0`
+- `base`
+  - `DEFAULT_INFERENCE_STEPS = 50`
+  - `DEFAULT_GUIDANCE_SCALE = 5.0`
+
+### Prompt Files
+
+- `PROMPTS_FILE` is the main prompt text file.
+- `NEGATIVE_PROMPTS_FILE` is an optional negative prompt text file.
+
+`inference.py` uses the first non-empty line from `PROMPTS_FILE`.
+
+`batch_inference.py` and `batch_inference_streaming.py` use all non-empty lines in `PROMPTS_FILE`.
+
+If `NEGATIVE_PROMPTS_FILE` exists, the first non-empty line is used as the negative prompt. If the file does not exist or is empty, the negative prompt is treated as disabled.
 
 ### Seed Modes
 
@@ -132,6 +165,17 @@ Behavior:
 - `decrement`: seeds decrease across runs
 
 The actual seed is written into the output filename, so every generated image remains traceable.
+
+### CFG Normalization
+
+This fork also exposes `CFG_NORMALIZATION`.
+
+It only matters when classifier-free guidance is actually active, which means:
+
+- `guidance_scale > 1.0`
+- and a negative prompt is present
+
+In practice, this mainly matters for `base` experiments. With the default `turbo` preset (`guidance_scale = 0.0`), `CFG_NORMALIZATION` is effectively inert.
 
 ## Batch Behavior
 
@@ -209,6 +253,18 @@ This fork exposes multiple attention backends through configuration:
 The currently best-tested option in this fork is `flash`.
 
 Backends that are not explicitly implemented in the codebase are not automatically supported. For example, installing another attention library such as SageAttention does not make it available by itself; the backend must also be wired into the local attention dispatch code.
+
+## Experimental Overrides
+
+The native implementation uses a dynamic image-size-dependent shift (`mu`) by default.
+
+If you want to compare that behavior against the Hugging Face Space style fixed shift, you can set:
+
+```bash
+ZIMAGE_FIXED_SHIFT=3.0
+```
+
+When this environment variable is set, the sampling path uses the fixed value instead of the native dynamic `calculate_shift(...)` result.
 
 ## Output Locations
 

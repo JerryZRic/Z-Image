@@ -29,7 +29,7 @@ MODEL_DEFAULTS = {
     # Official Base guidance recommends 28-50 steps and cfg around 3.0-5.0.
     "base": {
         "num_inference_steps": 50,
-        "guidance_scale": 5.0,
+        "guidance_scale": 4.0,
     },
 }
 
@@ -75,6 +75,7 @@ DEFAULT_INFERENCE_STEPS = MODEL_DEFAULTS[MODEL_VARIANT]["num_inference_steps"]
 DEFAULT_GUIDANCE_SCALE = MODEL_DEFAULTS[MODEL_VARIANT]["guidance_scale"]
 ATTENTION_BACKEND = "flash"
 STAGE_OFFLOAD = True
+CFG_NORMALIZATION = False
 PREVIEW_IMAGE_FORMAT = "jpg"
 PREVIEW_JPEG_QUALITY = 95
 SAVE_FINAL_IMAGES = True

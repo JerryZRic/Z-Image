@@ -10,6 +10,7 @@ import torch
 from model_paths import (
     ATTENTION_BACKEND,
     BATCH_OUTPUT_DIR,
+    CFG_NORMALIZATION,
     DEFAULT_GUIDANCE_SCALE,
     DEFAULT_INFERENCE_STEPS,
     IMAGE_HEIGHT,
@@ -142,6 +143,7 @@ def main():
             width=width,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
+            cfg_normalization=CFG_NORMALIZATION,
             generator=generator,
             execution_device=device,
             stage_offload=stage_offload,

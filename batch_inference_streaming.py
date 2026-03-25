@@ -18,6 +18,7 @@ import torch
 from model_paths import (
     ATTENTION_BACKEND,
     BATCH_OUTPUT_DIR,
+    CFG_NORMALIZATION,
     DEFAULT_GUIDANCE_SCALE,
     DEFAULT_INFERENCE_STEPS,
     FINAL_IMAGE_FORMAT,
@@ -214,6 +215,7 @@ def main():
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             generator=generator,
+            cfg_normalization=CFG_NORMALIZATION,
         )
         if memory_debug:
             debug_memory_snapshot(
