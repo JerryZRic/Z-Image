@@ -18,10 +18,13 @@ import torch
 from model_paths import (
     ATTENTION_BACKEND,
     BATCH_OUTPUT_DIR,
+    DEFAULT_GUIDANCE_SCALE,
+    DEFAULT_INFERENCE_STEPS,
     FINAL_IMAGE_FORMAT,
     FINAL_OUTPUT_DIR,
     IMAGE_HEIGHT,
     IMAGE_WIDTH,
+    NEGATIVE_PROMPTS_FILE,
     PARALLEL_BATCH_SIZE,
     PREVIEW_IMAGE_FORMAT,
     PREVIEW_JPEG_QUALITY,
@@ -45,6 +48,18 @@ def read_prompts(path: str) -> list[str]:
     if not prompts:
         raise ValueError(f"No prompts found in {prompt_path}")
     return prompts
+
+
+def read_first_optional_prompt(path: str) -> str | None:
+    prompt_path = Path(path)
+    if not prompt_path.exists():
+        return None
+    with prompt_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            prompt = line.strip()
+            if prompt:
+                return prompt
+    return None
 
 
 def slugify(text: str, max_len: int = 60) -> str:
@@ -75,8 +90,8 @@ def main():
     dtype = torch.bfloat16
     height = IMAGE_HEIGHT
     width = IMAGE_WIDTH
-    num_inference_steps = 8
-    guidance_scale = 0.0
+    num_inference_steps = DEFAULT_INFERENCE_STEPS
+    guidance_scale = DEFAULT_GUIDANCE_SCALE
     attn_backend = os.environ.get("ZIMAGE_ATTENTION", ATTENTION_BACKEND)
     preview_format = PREVIEW_IMAGE_FORMAT.lower()
     if preview_format not in {"jpg", "jpeg", "png", "bmp"}:
@@ -96,6 +111,9 @@ def main():
         print("PARALLEL_BATCH_SIZE is currently informational for this streaming script. Using serial decode with batch size 1.")
 
     prompts = read_prompts(os.environ.get("PROMPTS_FILE", str(PROMPTS_FILE)))
+    negative_prompt = read_first_optional_prompt(
+        os.environ.get("NEGATIVE_PROMPTS_FILE", str(NEGATIVE_PROMPTS_FILE))
+    )
     scheduled_prompts = build_prompt_schedule(prompts, total_count)
 
     device = select_device()
@@ -128,15 +146,20 @@ def main():
         device,
         next(components["text_encoder"].parameters()).dtype,
     )
-    prompt_embeds_list, _ = encode_prompt_embeddings(
+    prompt_embeds_list, negative_prompt_embeds_list = encode_prompt_embeddings(
         text_encoder_runtime,
         components["tokenizer"],
         prompt=unique_prompts,
+        negative_prompt=negative_prompt,
         guidance_scale=guidance_scale,
         target_device="cpu",
     )
     for prompt, embeds in zip(unique_prompts, prompt_embeds_list):
         prompt_embed_cache[prompt] = embeds
+    negative_prompt_embed_cache = {}
+    if negative_prompt_embeds_list:
+        for prompt, embeds in zip(unique_prompts, negative_prompt_embeds_list):
+            negative_prompt_embed_cache[prompt] = embeds
     del text_encoder_runtime
     cleanup_cuda_stage(device)
     if memory_debug:
@@ -178,10 +201,14 @@ def main():
 
         start_time = time.time()
         prompt_embed_gpu = prompt_embed_cache[prompt].to(device)
+        negative_prompt_embed_gpu = None
+        if guidance_scale > 1.0 and prompt in negative_prompt_embed_cache:
+            negative_prompt_embed_gpu = negative_prompt_embed_cache[prompt].to(device)
         latents = sample_latents(
             transformer_runtime,
             components["scheduler"],
             prompt_embeds_list=[prompt_embed_gpu],
+            negative_prompt_embeds_list=[negative_prompt_embed_gpu] if negative_prompt_embed_gpu is not None else None,
             height=height,
             width=width,
             num_inference_steps=num_inference_steps,
@@ -192,7 +219,11 @@ def main():
             debug_memory_snapshot(
                 f"stream_before_decode_{idx:02d}",
                 modules={"transformer_gpu": transformer_runtime, "vae_gpu": vae_runtime},
-                tensors={"prompt_embed_gpu": prompt_embed_gpu, "latents_gpu": latents},
+                tensors={
+                    "prompt_embed_gpu": prompt_embed_gpu,
+                    "negative_prompt_embed_gpu": negative_prompt_embed_gpu,
+                    "latents_gpu": latents,
+                },
             )
         try:
             images = decode_latents(vae_runtime, latents, output_type="pil")
@@ -201,7 +232,11 @@ def main():
                 debug_memory_snapshot(
                     f"stream_decode_failure_{idx:02d}",
                     modules={"transformer_gpu": transformer_runtime, "vae_gpu": vae_runtime},
-                    tensors={"prompt_embed_gpu": prompt_embed_gpu, "latents_gpu": latents},
+                    tensors={
+                        "prompt_embed_gpu": prompt_embed_gpu,
+                        "negative_prompt_embed_gpu": negative_prompt_embed_gpu,
+                        "latents_gpu": latents,
+                    },
                 )
             raise
         if SAVE_FINAL_IMAGES:
@@ -218,6 +253,8 @@ def main():
         elapsed = time.time() - start_time
         print(f"[{idx}/{total_count}] Saved {output_path} in {elapsed:.2f} seconds")
         del prompt_embed_gpu
+        if negative_prompt_embed_gpu is not None:
+            del negative_prompt_embed_gpu
         del latents
         if device == "cuda" and torch.cuda.is_available():
             torch.cuda.synchronize()

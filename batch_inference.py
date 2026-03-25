@@ -10,8 +10,11 @@ import torch
 from model_paths import (
     ATTENTION_BACKEND,
     BATCH_OUTPUT_DIR,
+    DEFAULT_GUIDANCE_SCALE,
+    DEFAULT_INFERENCE_STEPS,
     IMAGE_HEIGHT,
     IMAGE_WIDTH,
+    NEGATIVE_PROMPTS_FILE,
     PARALLEL_BATCH_SIZE,
     PROMPTS_FILE,
     SEED_MODE,
@@ -37,7 +40,20 @@ def read_prompts(path: str) -> list[str]:
     return prompts
 
 
+def read_first_optional_prompt(path: str) -> str | None:
+    prompt_path = Path(path)
+    if not prompt_path.exists():
+        return None
+    with prompt_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            prompt = line.strip()
+            if prompt:
+                return prompt
+    return None
+
+
 PROMPTS = read_prompts(os.environ.get("PROMPTS_FILE", str(PROMPTS_FILE)))
+NEGATIVE_PROMPT = read_first_optional_prompt(os.environ.get("NEGATIVE_PROMPTS_FILE", str(NEGATIVE_PROMPTS_FILE)))
 
 
 def slugify(text: str, max_len: int = 60) -> str:
@@ -81,8 +97,8 @@ def main():
     stage_offload = STAGE_OFFLOAD
     height = IMAGE_HEIGHT
     width = IMAGE_WIDTH
-    num_inference_steps = 8
-    guidance_scale = 0.0
+    num_inference_steps = DEFAULT_INFERENCE_STEPS
+    guidance_scale = DEFAULT_GUIDANCE_SCALE
     attn_backend = os.environ.get("ZIMAGE_ATTENTION", ATTENTION_BACKEND)
     output_dir = BATCH_OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
@@ -120,6 +136,7 @@ def main():
         start_time = time.time()
         images = generate(
             prompt=prompt,
+            negative_prompt=NEGATIVE_PROMPT,
             **components,
             height=height,
             width=width,

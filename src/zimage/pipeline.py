@@ -216,13 +216,17 @@ def sample_latents(
     actual_batch_size = batch_size
     image_seq_len = (latents.shape[2] // 2) * (latents.shape[3] // 2)
 
-    mu = calculate_shift(
-        image_seq_len,
-        scheduler.config.get("base_image_seq_len", 256),
-        scheduler.config.get("max_image_seq_len", 4096),
-        scheduler.config.get("base_shift", 0.5),
-        scheduler.config.get("max_shift", 1.15),
-    )
+    fixed_shift = os.environ.get("ZIMAGE_FIXED_SHIFT")
+    if fixed_shift is not None and fixed_shift != "":
+        mu = float(fixed_shift)
+    else:
+        mu = calculate_shift(
+            image_seq_len,
+            scheduler.config.get("base_image_seq_len", 256),
+            scheduler.config.get("max_image_seq_len", 4096),
+            scheduler.config.get("base_shift", 0.5),
+            scheduler.config.get("max_shift", 1.15),
+        )
     scheduler.sigma_min = 0.0
     timesteps, num_inference_steps = retrieve_timesteps(
         scheduler,

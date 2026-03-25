@@ -10,8 +10,12 @@ import torch
 warnings.filterwarnings("ignore")
 from model_paths import (
     ATTENTION_BACKEND,
+    DEFAULT_GUIDANCE_SCALE,
+    DEFAULT_INFERENCE_STEPS,
     IMAGE_HEIGHT,
     IMAGE_WIDTH,
+    NEGATIVE_PROMPTS_FILE,
+    PROMPTS_FILE,
     SEED_MODE,
     SEED_STATE_FILE,
     SEED_VALUE,
@@ -22,6 +26,30 @@ from utils import AttentionBackend, load_from_fixed_paths, resolve_seed, set_att
 from zimage import generate
 
 
+def read_first_prompt(path: str) -> str:
+    prompt_path = Path(path)
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+    with prompt_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            prompt = line.strip()
+            if prompt:
+                return prompt
+    raise ValueError(f"No prompts found in {prompt_path}")
+
+
+def read_first_optional_prompt(path: str) -> str | None:
+    prompt_path = Path(path)
+    if not prompt_path.exists():
+        return None
+    with prompt_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            prompt = line.strip()
+            if prompt:
+                return prompt
+    return None
+
+
 def main():
     dtype = torch.bfloat16
     compile = False  # default False for compatibility
@@ -29,14 +57,12 @@ def main():
     output_dir = SINGLE_OUTPUT_DIR
     height = IMAGE_HEIGHT
     width = IMAGE_WIDTH
-    num_inference_steps = 8
-    guidance_scale = 0.0
+    num_inference_steps = DEFAULT_INFERENCE_STEPS
+    guidance_scale = DEFAULT_GUIDANCE_SCALE
     attn_backend = os.environ.get("ZIMAGE_ATTENTION", ATTENTION_BACKEND)
-    prompt = (
-        "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. "
-        "Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. "
-        "Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, "
-        "silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights."
+    prompt = read_first_prompt(os.environ.get("PROMPTS_FILE", str(PROMPTS_FILE)))
+    negative_prompt = read_first_optional_prompt(
+        os.environ.get("NEGATIVE_PROMPTS_FILE", str(NEGATIVE_PROMPTS_FILE))
     )
 
     # Device selection priority: cuda -> tpu -> mps -> cpu
@@ -76,6 +102,7 @@ def main():
     start_time = time.time()
     images = generate(
         prompt=prompt,
+        negative_prompt=negative_prompt,
         **components,
         height=height,
         width=width,
